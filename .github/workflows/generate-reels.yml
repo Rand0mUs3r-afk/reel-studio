@@ -1,0 +1,76 @@
+name: Generate Reels
+on:
+  workflow_dispatch:
+    inputs:
+      input_mode: {type: choice, default: demo, description: 'Photo source', options: [demo, photo_urls, product_url, repository_folder]}
+      source: {type: string, default: '', description: 'Product URL, comma-separated HTTPS photo URLs, or repository folder'}
+      variants: {type: choice, default: '3', description: 'Shorts per photo or story', options: ['1','2','3','5','10']}
+      scope: {type: choice, default: story, description: 'Combine gallery or use each photo separately', options: [story, per_photo]}
+      main_words: {type: string, default: '', description: 'Offer/keywords to turn into a sentence; max 180 characters, e.g. 2 for $30'}
+      reel_idea: {type: string, default: '', description: 'Your creative idea, sequence, mood and ending'}
+      idea_mode: {type: choice, default: auto, description: 'Follow my idea requires cloud_ai and an OpenAI secret', options: [auto, follow_my_idea]}
+      engine: {type: choice, default: local_ai, description: 'Local vision AI, cloud creative director, or basic templates', options: [local_ai, cloud_ai, basic]}
+      captions: {type: choice, default: both, description: 'Post caption and/or scene text; explicit offer text still appears', options: [none, post_only, on_screen, both]}
+      voice: {type: choice, default: ai_decides, description: 'Narration direction', options: [ai_decides, 'off', warm, energetic]}
+      presenter: {type: choice, default: none, description: 'Portrait overlays, not lip-sync; AI portraits require OpenAI secret', options: [none, illustrated_robot, ai_influencer, ai_humanoid]}
+      duration: {type: choice, default: '15', description: 'Target seconds', options: ['15','30','45','60']}
+      style: {type: choice, default: product_showcase, description: 'Style; strict idea can override it', options: [cinematic, fast_paced, minimal, product_showcase]}
+      resolution: {type: choice, default: 1080p, description: 'Vertical resolution', options: [720p, 1080p]}
+      instructions: {type: string, default: '', description: 'Additional cloud brief; recorded in other modes'}
+permissions:
+  contents: read
+concurrency:
+  group: reel-studio-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install renderer and voice
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core
+          python -m pip install -r requirements.txt
+      - name: Tests without external AI calls
+        run: |
+          python -m compileall -q studio.py creator.py tests
+          python -m pytest -q
+      - name: Install local vision libraries if selected
+        if: inputs.engine == 'local_ai'
+        run: |
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'transformers>=4.45,<5'
+      - name: Generate Reels
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INPUT_MODE: ${{ inputs.input_mode }}
+          SOURCE: ${{ inputs.source }}
+          COUNT: ${{ inputs.variants }}
+          SCOPE: ${{ inputs.scope }}
+          WORDS: ${{ inputs.main_words }}
+          IDEA: ${{ inputs.reel_idea }}
+          MODE: ${{ inputs.idea_mode }}
+          ENGINE: ${{ inputs.engine }}
+          CAPTIONS: ${{ inputs.captions }}
+          VOICE: ${{ inputs.voice }}
+          PRESENTER: ${{ inputs.presenter }}
+          DURATION: ${{ inputs.duration }}
+          STYLE: ${{ inputs.style }}
+          RESOLUTION: ${{ inputs.resolution }}
+          INSTRUCTIONS: ${{ inputs.instructions }}
+          TOKENIZERS_PARALLELISM: 'false'
+        run: python creator.py --input-mode="$INPUT_MODE" --source="$SOURCE" --count="$COUNT" --scope="$SCOPE" --main-words="$WORDS" --reel-idea="$IDEA" --idea-mode="$MODE" --engine="$ENGINE" --captions="$CAPTIONS" --voice="$VOICE" --presenter="$PRESENTER" --duration="$DURATION" --style="$STYLE" --resolution="$RESOLUTION" --instructions="$INSTRUCTIONS"
+      - name: Download finished Reels
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-studio-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
