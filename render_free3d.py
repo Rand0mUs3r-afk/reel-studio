@@ -1,4 +1,4 @@
-"""Blender renderer with NumPy installed for Blender's own Python ABI."""
+"""Portable CPU mesh renderer; native GLB/render/MP4 preflight."""
 import importlib,json,math,os,platform,shutil,subprocess,sys,tempfile
 from pathlib import Path
 
@@ -28,17 +28,58 @@ def ensure_numpy(cache_dir=None,python_version=None):
     print(f'Blender Python {version[0]}.{version[1]} | NumPy {np.__version__} | {np.__file__}',flush=True)
     return np
 
+def configure_cpu_render(scene,samples=16):
+    scene.render.engine='CYCLES';scene.cycles.device='CPU';scene.cycles.samples=samples
+    scene.cycles.use_denoising=False
+    for layer in scene.view_layers:
+        cycles=getattr(layer,'cycles',None)
+        if cycles is not None and hasattr(cycles,'use_denoising'): cycles.use_denoising=False
+    scene.use_nodes=False
+    scene.render.use_compositing=False
+    print('Portable CPU render: denoising disabled; samples='+str(samples),flush=True)
+
+def validate_smoke_metadata(info):
+    video=next((s for s in info.get('streams',[]) if s.get('codec_type')=='video'),{})
+    audio=next((s for s in info.get('streams',[]) if s.get('codec_type')=='audio'),{})
+    if video.get('codec_name')!='h264' or (video.get('width'),video.get('height'))!=(72,128): raise RuntimeError('Smoke MP4 has invalid video format')
+    if audio.get('codec_name')!='aac' or float(info.get('format',{}).get('duration',0))<=0: raise RuntimeError('Smoke MP4 has no valid audio/duration')
+
+def encode_smoke(frames,target):
+    graph="[0:v][1:v]overlay=enable='gte(t,0.04)'[v];[2:a][3:a]amix=inputs=2:duration=longest[a]"
+    command=['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-framerate','24','-i',str(frames/'frame_%05d.png'),'-loop','1','-i',str(frames/'frame_00001.png'),'-f','lavfi','-i','anullsrc=r=22050:cl=mono','-f','lavfi','-i','anullsrc=r=22050:cl=mono','-filter_complex',graph,'-map','[v]','-map','[a]','-t',str(2/24),'-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',str(target)]
+    subprocess.run(command,check=True,timeout=120)
+    if not target.is_file() or target.stat().st_size==0: raise RuntimeError('Smoke MP4 missing')
+    probe=subprocess.run(['ffprobe','-v','error','-show_entries','stream=codec_type,codec_name,width,height:format=duration','-of','json',str(target)],capture_output=True,text=True,check=True,timeout=30)
+    validate_smoke_metadata(json.loads(probe.stdout))
+
 def check_glb_import():
     import bpy
     bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
     bpy.ops.mesh.primitive_cube_add()
-    with tempfile.TemporaryDirectory(prefix='reel-blender-check-') as folder:
-        model=str(Path(folder)/'cube.glb')
-        bpy.ops.export_scene.gltf(filepath=model,export_format='GLB')
-        bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
-        bpy.ops.import_scene.gltf(filepath=model)
-        if not any(obj.type=='MESH' for obj in bpy.context.scene.objects): raise RuntimeError('GLB round-trip produced no mesh')
-    print('Blender NumPy and GLB export/import preflight passed',flush=True)
+    obj=bpy.context.object;obj.scale=(1,.6,1.3)
+    colors=obj.data.color_attributes.new(name='Color',type='FLOAT_COLOR',domain='CORNER')
+    for color in colors.data: color.color=(.05,.4,.3,1)
+    mat=bpy.data.materials.new('Smoke vertex color');mat.use_nodes=True
+    node=mat.node_tree.nodes.new('ShaderNodeVertexColor');node.layer_name=colors.name
+    mat.node_tree.links.new(node.outputs['Color'],mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'])
+    obj.data.materials.append(mat)
+    with tempfile.TemporaryDirectory(prefix='reel-blender-check-') as temporary:
+        folder=Path(temporary);model=folder/'cube.glb'
+        bpy.ops.export_scene.gltf(filepath=str(model),export_format='GLB')
+        cfg={'model':str(model),'frames':str(folder/'frames'),'duration':2/24,'quality':'preview_360p','variant':0,'motion':'orbit','angle':45,'light':False,'_smoke_test':True}
+        render_scene(cfg)
+        images=[]
+        for index in (1,2):
+            path=folder/'frames'/f'frame_{index:05d}.png'
+            if not path.is_file(): raise RuntimeError('Native render did not save both smoke frames')
+            image=bpy.data.images.load(str(path))
+            if tuple(image.size)!=(72,128): raise RuntimeError('Wrong smoke image dimensions')
+            pixels=list(image.pixels);rgb=[value for i,value in enumerate(pixels) if i%4!=3]
+            if max(rgb)-min(rgb)<.0001: raise RuntimeError('Smoke render is a uniform blank image')
+            images.append(rgb);bpy.data.images.remove(image)
+        if not any(abs(a-b)>.0001 for a,b in zip(*images)): raise RuntimeError('Smoke camera motion did not change the rendered image')
+        encode_smoke(folder/'frames',folder/'smoke.mp4')
+    print('Blender GLB, CPU render, overlay/audio and H.264 MP4 smoke test passed',flush=True)
 
 def render_scene(cfg):
     import bpy
@@ -80,12 +121,13 @@ def render_scene(cfg):
         obj=bpy.data.objects.new(name,light);scene.collection.objects.link(obj);obj.location=location;aim(obj)
     camera=bpy.data.objects.new('Camera',bpy.data.cameras.new('Camera'));scene.collection.objects.link(camera);scene.camera=camera
     camera.data.type='ORTHO'
-    scene.render.engine='CYCLES';scene.cycles.device='CPU';scene.cycles.samples=8;scene.cycles.use_denoising=True
-    width={'preview_360p':360,'720p':720,'1080p':1080}[cfg['quality']]
+    smoke=cfg.get('_smoke_test',False)
+    configure_cpu_render(scene,samples=1 if smoke else 16)
+    width=72 if smoke else {'preview_360p':360,'720p':720,'1080p':1080}[cfg['quality']]
     scene.render.resolution_x=width;scene.render.resolution_y=width*16//9;scene.render.resolution_percentage=100;scene.render.fps=24
     scene.render.image_settings.file_format='PNG'
     folder=Path(cfg['frames']);folder.mkdir(parents=True,exist_ok=True)
-    count=round(cfg['duration']*24)
+    count=2 if smoke else round(cfg['duration']*24)
     for index in range(count):
         t=index/max(1,count-1);angle=cfg['variant']*.35+math.radians(cfg['angle'])*t
         rig.rotation_euler=(0,0,0);rig.location=(0,0,0);camera.location=(3,-5,2.8);camera.data.ortho_scale=4.8

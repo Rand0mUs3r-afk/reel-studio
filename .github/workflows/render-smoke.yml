@@ -1,0 +1,31 @@
+name: Native Blender and MP4 Smoke Test
+on:
+  push:
+    paths: ['render_free3d.py', 'free3d.py', 'requirements.txt', 'tests/**', '.github/workflows/render-smoke.yml']
+  pull_request:
+    paths: ['render_free3d.py', 'free3d.py', 'requirements.txt', 'tests/**', '.github/workflows/render-smoke.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU Blender and encoders - no inference model
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y blender ffmpeg
+          python -m pip install --no-cache-dir -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest -q
+      - name: Import colored GLB, render real frames, composite and encode MP4
+        env:
+          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: blender --background --disable-autoexec --python-exit-code 1 --python render_free3d.py -- --check-deps
