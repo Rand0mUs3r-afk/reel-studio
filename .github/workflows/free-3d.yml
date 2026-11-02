@@ -1,0 +1,76 @@
+name: Free 3D Product Video - Experimental CPU
+on:
+  workflow_dispatch:
+    inputs:
+      input_mode: {type: choice, default: image_url, options: [image_url, repository_image, product_url, existing_glb, demo_3d]}
+      source: {type: string, default: '', description: 'HTTPS image/product/model URL or repository image/model path'}
+      image_index: {type: string, default: '1', description: 'Product gallery image number'}
+      variants: {type: choice, default: '1', options: ['1','2','3','5','10']}
+      duration: {type: choice, default: '5', options: ['5','10','15']}
+      quality: {type: choice, default: preview_360p, options: [preview_360p, 720p, 1080p]}
+      mesh_resolution: {type: choice, default: '64', options: ['64','96','128']}
+      motion: {type: choice, default: auto, options: [auto, turntable, orbit, float, reveal]}
+      main_words: {type: string, default: '', description: 'Offer fragments; local templates, max 180 characters'}
+      reel_idea: {type: string, default: '', description: 'Keyword director: orbit/float/reveal/turntable, slow/fast, light, no music/no voice. Not full language-model direction.'}
+      captions: {type: choice, default: post_and_offer, options: [none, offer, post_and_offer]}
+      music: {type: choice, default: auto, options: [auto, 'off', 'on']}
+      voice: {type: choice, default: 'off', options: ['off', 'on']}
+permissions:
+  contents: read
+concurrency:
+  group: free-3d-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install renderer and base libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y blender ffmpeg espeak-ng fonts-dejavu-core
+          python -m pip install --no-cache-dir -r requirements.txt
+      - name: Install CPU reconstruction only for image inputs
+        if: inputs.input_mode != 'demo_3d' && inputs.input_mode != 'existing_glb'
+        run: |
+          git init .triposr
+          git -C .triposr remote add origin https://github.com/VAST-AI-Research/TripoSR.git
+          git -C .triposr fetch --depth 1 origin 107cefdc244c39106fa830359024f6a2f1c78871
+          git -C .triposr checkout --detach FETCH_HEAD
+          python -m pip install --no-cache-dir torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-cache-dir -r requirements-free3d.txt
+      - name: Compile and test
+        run: |
+          python -m compileall -q free3d.py reconstruct_cpu.py render_free3d.py tests
+          python -m pytest -q
+      - name: Generate actual 3D mesh and video - no paid API secrets
+        env:
+          MODE: ${{ inputs.input_mode }}
+          SOURCE: ${{ inputs.source }}
+          INDEX: ${{ inputs.image_index }}
+          COUNT: ${{ inputs.variants }}
+          DURATION: ${{ inputs.duration }}
+          QUALITY: ${{ inputs.quality }}
+          RES: ${{ inputs.mesh_resolution }}
+          MOTION: ${{ inputs.motion }}
+          WORDS: ${{ inputs.main_words }}
+          IDEA: ${{ inputs.reel_idea }}
+          CAPTIONS: ${{ inputs.captions }}
+          MUSIC: ${{ inputs.music }}
+          VOICE: ${{ inputs.voice }}
+          HF_HUB_DISABLE_TELEMETRY: '1'
+        run: python free3d.py --input-mode="$MODE" --source="$SOURCE" --image-index="$INDEX" --variants="$COUNT" --duration="$DURATION" --quality="$QUALITY" --mesh-resolution="$RES" --motion="$MOTION" --main-words="$WORDS" --reel-idea="$IDEA" --captions="$CAPTIONS" --music="$MUSIC" --voice="$VOICE"
+      - name: Preserve available model/video outputs even after failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: free-3d-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output_free3d/
+          if-no-files-found: warn
+          retention-days: 7
