@@ -1,17 +1,53 @@
-# Reel Studio — free experimental 3D
+# Reel Studio — product photo ads
 
-Use Actions > Free 3D Product Video - Experimental CPU > Run workflow. No paid inference API, account key or paid GPU is used. The old slideshow workflow is disabled. Standard public-repository runner rules and GitHub resource/storage limits still apply; this is not an unlimited compute service.
+## Recommended: photo-preserving ad mode
 
-First real-image test: input_mode=image_url, source=your public HTTPS product image, variants=1, duration=5, quality=preview_360p, mesh_resolution=64, voice/music=off. Or upload a photo into inbox and choose repository_image with its file path. product_url selects a page image using image_index. This experiment reconstructs one source image per run, then reuses the mesh across variants.
+Turn 1–8 photos of the same product into one vertical ad: hook → up to three verified benefits → optional exact offer → call to action. Original product images are fitted into the design without cropping or generative reconstruction; mild pan/zoom animates the finished scene cards. This is a designed 2D photo ad, not photorealistic image-to-video, background removal, or new product camera angles. No invented claims, automatic posting, paid API calls, or provider keys.
 
-Pipeline: local TripoSR CPU inference -> vertex-colored GLB mesh -> Blender geometry animation -> MP4. No slideshow or paid-service fallback. Downloads of public model weights and a background-removal model are required, but source-photo inference runs on the runner. Higher mesh resolutions and video sizes need more compute.
+### Browser upload interface
 
-No-reconstruction smoke test: demo_3d, source empty, one variant, 5 seconds, preview_360p, voice/music off. This renders a procedural 3D bottle, NOT a model inferred from your photo. existing_glb can reuse an exported model after a rendering failure.
+Install FFmpeg (including ffprobe), DejaVu Sans fonts, and optionally espeak-ng for basic English narration. On Ubuntu:
 
-Motion: turntable/orbit/float/reveal. main_words uses conservative local offer-sentence templates. reel_idea is a KEYWORD director, not a general language model: orbit/float/reveal/turntable, slow/fast, light background, no music/no voice. Unrecognized details are recorded but not interpreted; an explicit motion dropdown overrides keyword motion. Audio uses synthesized original backing and optional English espeak-ng narration. No lip-synced avatar or premium voice.
+```bash
+sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core espeak-ng
+python -m pip install -r requirements.txt -r requirements-ui.txt
+streamlit run product_ad_app.py
+```
 
-Download the free-3d artifact: GLB, MP4 variants, covers, caption/settings/provenance and upstream license where applicable. Available outputs are preserved on failure. Artifact retention: 7 days. Public source photos, logs and artifacts are not private. No automatic social posting.
+Upload photos, fill in product name, brand, hook, verified benefits, exact offer, CTA, brand colors, and optional logo. Preview the scene images/storyboard before generating. Optional music must be your own licensed audio. Narration is basic espeak-ng, not a premium AI voice; text that exceeds the chosen duration is rejected rather than cut off. Outputs include MP4, cover, scene previews, exact timeline, scene-level SRT subtitles, caption text and ffprobe validation. Scene text is burned into the video; the SRT is scene-timed, not word-aligned.
 
-Experimental: upstream TripoSR code is pinned to 107cefdc244c39106fa830359024f6a2f1c78871; CPU marching cubes uses scikit-image instead of a CUDA extension. Vertex colors are not high-resolution texture baking. Hidden sides, labels and geometry can be wrong; this is not verified CAD. CPU runtime/memory, downloaded checkpoints and Blender integration have NOT been end-to-end verified by the assistant. Start small, inspect results, then refine.
+Uploads are processed in temporary local folders and removed after the job; downloadable bytes remain in the browser app session until cleared. The UI has no authentication or job queue: do not expose it publicly without adding access controls and resource limits. Images: 15 MB each, minimum 200×200, maximum 30 million pixels. Logos use the same image limits. Music uploads: 30 MB. Browser output archive: 200 MB maximum.
 
-Source: https://github.com/VAST-AI-Research/TripoSR . Preserve its MIT notices and comply with upstream model/dependency licenses. Legacy modules remain for reference but the active free workflow does not call their cloud API helpers or pass provider secrets.
+### GitHub-only generation
+
+Add 1–8 photos to a repository folder such as `inbox`, then open **Actions → Product Photo Ad → Run workflow**. Supply the product details; separate benefits using `|`. Download the artifact after completion. This path does not need Blender, TripoSR, GPU or AI credentials. Standard GitHub compute/storage limits apply. Artifacts expire after seven days. On public repositories, committed inputs and artifacts must not be treated as private. Existing 3D workflows remain separate.
+
+### Command line
+
+```bash
+python product_ad.py --photos inbox/front.png inbox/side.png \
+  --product 'Your product' --brand 'Your brand' \
+  --hook 'Meet your next everyday essential' \
+  --benefit 'A verified feature you supplied' \
+  --offer 'Your exact promotion and conditions' --cta 'Visit our store' \
+  --duration 15 --resolution 720p --output output_ads
+```
+
+Add `--preview-only` to create storyboards without FFmpeg. Use a different empty output directory for the full render; existing files are never overwritten. `--logo`, `--background`, `--accent`, `--music` (licensed local audio) and `--voice` are optional. All advertising text comes from the supplied brief and is not independently fact-checked. Photos cycle in upload order across scenes; front/back photos are not fused into a 3D model. Music and voice default off. No brand URL fetching, general natural-language director, auto-posting, avatars, lip sync, or generated footage is added in this mode.
+
+### Tests
+
+```bash
+python -m pytest -q tests/test_product_ad.py
+PHOTO_AD_SMOKE=1 python -m pytest -q tests/test_product_ad.py
+```
+
+The opt-in smoke test encodes a real 15-second 720p H.264 MP4 and probes its duration and dimensions. It does not verify subjective visual quality, the Streamlit deployment or GitHub runner operation. Inspect the preview before using an ad.
+
+## Optional: experimental 3D showcase
+
+The original **Free 3D Product Video - Experimental CPU** workflow remains unchanged. It reconstructs one image into a vertex-colored GLB using CPU TripoSR, then animates real geometry in Blender. Inputs include public image/product URLs, repository images, an existing GLB or procedural demo. Motion options: turntable, orbit, float, reveal. Use `upload_app.py` for its separate batch UI.
+
+This mode is approximate: hidden sides, labels, logos and geometry may be wrong. Vertex colors are not high-resolution texture baking or verified CAD. Start with one five-second preview_360p variant and voice/music off. CPU reconstruction/rendering can be slow; public model downloads and GitHub resource limits apply. Offers use local templates and the idea field understands only documented keywords. No paid-service fallback, premium voice, lip-synced presenter or social posting.
+
+Upstream TripoSR remains pinned by its workflow to `107cefdc244c39106fa830359024f6a2f1c78871`. Preserve its MIT notices and comply with model/dependency licenses: https://github.com/VAST-AI-Research/TripoSR . Artifacts expire after seven days. The legacy slideshow workflow is still disabled; cloud helpers in legacy modules are not used by either free active workflow.

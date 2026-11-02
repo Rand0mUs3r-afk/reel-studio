@@ -1,0 +1,72 @@
+name: Product Photo Ad
+on:
+  workflow_dispatch:
+    inputs:
+      photo_folder: {type: string, default: inbox, description: 'Repository folder with 1-8 product photos'}
+      product: {type: string, required: true, description: 'Product name'}
+      brand: {type: string, default: ''}
+      hook: {type: string, default: ''}
+      benefits: {type: string, default: '', description: 'Verified benefits separated by | (max 3)'}
+      offer: {type: string, default: '', description: 'Exact offer and conditions; no generated claims'}
+      cta: {type: string, default: 'Discover more'}
+      duration: {type: choice, default: '15', options: ['15', '30']}
+      resolution: {type: choice, default: 720p, options: [720p, 1080p]}
+      voice: {type: boolean, default: false}
+permissions:
+  contents: read
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install photo renderer (no reconstruction models or provider keys)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core
+          python -m pip install 'Pillow>=10.4,<13' 'pytest>=8,<10'
+      - name: Test and encode a real smoke video
+        env:
+          PHOTO_AD_SMOKE: '1'
+        run: python -m pytest -q tests/test_product_ad.py
+      - name: Generate product ad
+        env:
+          PHOTO_FOLDER: ${{ inputs.photo_folder }}
+          PRODUCT: ${{ inputs.product }}
+          BRAND: ${{ inputs.brand }}
+          HOOK: ${{ inputs.hook }}
+          BENEFITS: ${{ inputs.benefits }}
+          OFFER: ${{ inputs.offer }}
+          CTA: ${{ inputs.cta }}
+          DURATION: ${{ inputs.duration }}
+          RESOLUTION: ${{ inputs.resolution }}
+          VOICE: ${{ inputs.voice }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import product_ad as ads
+          root=Path.cwd().resolve()
+          folder=(root/os.environ['PHOTO_FOLDER']).resolve()
+          if not folder.is_relative_to(root) or '.git' in folder.parts or not folder.is_dir():
+              raise ValueError('Photo folder must be inside the checked-out repository')
+          paths=sorted(p for p in folder.iterdir() if p.suffix.lower() in ('.png','.jpg','.jpeg','.webp'))
+          if not 1<=len(paths)<=8 or any(not p.resolve().is_relative_to(root) for p in paths):
+              raise ValueError('Folder must contain 1-8 photos inside the repository')
+          photos=[ads.photo_from_bytes(p.read_bytes()) for p in paths]
+          plan=ads.make_plan(os.environ['PRODUCT'],os.environ['BENEFITS'].split('|'),os.environ['OFFER'],os.environ['CTA'],os.environ['HOOK'],os.environ['BRAND'])
+          ads.render(photos,plan,'output_ads',int(os.environ['DURATION']),os.environ['RESOLUTION'],voice=os.environ['VOICE'].lower()=='true')
+          PY
+      - name: Download video, storyboard and previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-ad-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output_ads/
+          if-no-files-found: warn
+          retention-days: 7
