@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 .env
 *.key
+output_free3d/
+.free3d-work/
+.triposr/
+.upload-jobs/
+.venv/
+.streamlit/secrets.toml
