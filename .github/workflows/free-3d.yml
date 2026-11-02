@@ -36,6 +36,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y blender ffmpeg espeak-ng fonts-dejavu-core
           python -m pip install --no-cache-dir -r requirements.txt
+      - name: Validate NumPy inside Blender and round-trip a GLB before model downloads
+        env:
+          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: blender --background --disable-autoexec --python-exit-code 1 --python render_free3d.py -- --check-deps
       - name: Install CPU reconstruction only for image inputs
         if: inputs.input_mode != 'demo_3d' && inputs.input_mode != 'existing_glb'
         run: |
