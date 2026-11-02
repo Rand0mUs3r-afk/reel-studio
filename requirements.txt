@@ -1,0 +1,4 @@
+Pillow>=10.4,<13
+beautifulsoup4>=4.12,<5
+numpy>=1.26,<3
+pytest>=8,<10

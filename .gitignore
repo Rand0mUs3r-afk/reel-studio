@@ -1,0 +1,6 @@
+output/
+.studio-work/
+__pycache__/
+.pytest_cache/
+.env
+*.key
