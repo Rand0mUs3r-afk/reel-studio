@@ -1,0 +1,87 @@
+name: Compare Product Ad Approaches
+on:
+  workflow_dispatch:
+    inputs:
+      image_urls: {type: string, required: true, description: '1-6 direct HTTPS product photo URLs, one per line; one photo is enough'}
+      product: {type: string, required: true}
+      brand: {type: string, default: ''}
+      hook: {type: string, default: ''}
+      benefits: {type: string, default: '', description: 'Verified benefits separated by | (maximum 3)'}
+      offer: {type: string, default: ''}
+      cta: {type: string, default: 'Discover more'}
+      duration: {type: choice, default: '15', options: ['15','30']}
+      resolution: {type: choice, default: 720p, options: [720p,1080p]}
+      include_3d: {type: boolean, default: true, description: 'Also attempt a slow five-second experimental CPU 3D orbit'}
+permissions:
+  contents: read
+concurrency:
+  group: compare-product-ads-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install base ad renderer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          python -m pip install -r requirements.txt
+      - name: Optional automatic background removal
+        continue-on-error: true
+        run: python -m pip install 'rembg==2.0.59' 'numpy==1.26.4' onnxruntime
+      - name: Optional pinned 3D reconstruction dependencies
+        if: inputs.include_3d
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y blender espeak-ng
+          git init .triposr
+          git -C .triposr remote add origin https://github.com/VAST-AI-Research/TripoSR.git
+          git -C .triposr fetch --depth 1 origin 107cefdc244c39106fa830359024f6a2f1c78871
+          git -C .triposr checkout --detach FETCH_HEAD
+          python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements-free3d.txt
+      - name: Tests and real 2D MP4 smoke encode
+        env:
+          PHOTO_AD_SMOKE: '1'
+        run: python -m pytest -q tests/test_product_ad.py tests/test_ad_sources.py tests/test_comparison_suite.py
+      - name: Run approaches and preserve per-mode status
+        env:
+          IMAGE_URLS: ${{ inputs.image_urls }}
+          PRODUCT: ${{ inputs.product }}
+          BRAND: ${{ inputs.brand }}
+          HOOK: ${{ inputs.hook }}
+          BENEFITS: ${{ inputs.benefits }}
+          OFFER: ${{ inputs.offer }}
+          CTA: ${{ inputs.cta }}
+          DURATION: ${{ inputs.duration }}
+          RESOLUTION: ${{ inputs.resolution }}
+          INCLUDE_3D: ${{ inputs.include_3d }}
+          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+          HF_HUB_DISABLE_TELEMETRY: '1'
+        run: |
+          python - <<'PY'
+          import os
+          import product_ad as ads
+          from ad_sources import prepare_inputs
+          from comparison_suite import suite
+          photos,_=prepare_inputs([],os.environ['IMAGE_URLS'])
+          plan=ads.make_plan(os.environ['PRODUCT'],os.environ['BENEFITS'].split('|'),os.environ['OFFER'],os.environ['CTA'],os.environ['HOOK'],os.environ['BRAND'])
+          results=suite(photos,plan,'output_comparison',int(os.environ['DURATION']),os.environ['RESOLUTION'],os.environ['INCLUDE_3D'].lower()=='true')
+          if not any(r['status']=='completed' and r['name']!='Background removal' for r in results):
+              raise SystemExit('No render completed; inspect the comparison report')
+          PY
+      - name: Download all available variants and comparison report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-ad-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output_comparison/
+          if-no-files-found: warn
+          retention-days: 7
