@@ -1,24 +1,31 @@
-name: Compare Product Ad Approaches
+name: Product Ad Video - Rotation and Presenter Controls
 on:
   workflow_dispatch:
     inputs:
-      image_urls: {type: string, required: true, description: '1-6 direct HTTPS product photo URLs, one per line; one photo is enough'}
-      product: {type: string, required: true}
-      brand: {type: string, default: ''}
-      hook: {type: string, default: ''}
-      benefits: {type: string, default: '', description: 'Verified benefits separated by | (maximum 3)'}
-      offer: {type: string, default: ''}
-      cta: {type: string, default: 'Discover more'}
-      duration: {type: choice, default: '15', options: ['15','30']}
-      resolution: {type: choice, default: 720p, options: [720p,1080p]}
-      include_3d: {type: boolean, default: true, description: 'Also attempt a slow five-second experimental CPU 3D orbit'}
+      input_mode: {type: choice, default: image_url, options: [image_url, repository_image, product_url, existing_glb, demo_3d]}
+      source: {type: string, default: '', description: 'Direct HTTPS image, product page, repository file, or GLB; empty only for demo'}
+      image_index: {type: string, default: '1', description: 'Image number from a product page'}
+      product_name: {type: string, default: 'Product showcase'}
+      variants: {type: choice, default: '1', options: ['1','2','3','5','10']}
+      duration: {type: choice, default: '10', options: ['5','10','15']}
+      quality: {type: choice, default: preview_360p, options: [preview_360p,720p,1080p]}
+      mesh_resolution: {type: choice, default: '64', options: ['64','96','128']}
+      motion: {type: choice, default: turntable, options: [auto,turntable,orbit,float,reveal]}
+      rotation: {type: choice, default: '180', options: ['90','180','360'], description: 'Exact model turn or camera orbit; overrides slow/fast angle keywords'}
+      main_words: {type: string, default: '', description: 'Exact offer; used for offer captions'}
+      reel_idea: {type: string, default: '', description: 'Existing keyword direction; light background etc. Rotation uses its own dropdown.'}
+      captions: {type: choice, default: post_and_offer, options: [none,offer,post_and_offer]}
+      music: {type: choice, default: 'on', options: [auto,'off','on']}
+      voice: {type: choice, default: 'on', options: ['off','on']}
+      presenter: {type: choice, default: voiceover_only, options: [voiceover_only,visible_humanoid_illustrated], description: 'Visible option is a free animated illustration, not a realistic AI person'}
+      narration_text: {type: string, default: '', description: 'Optional exact script. Default: product name plus offer. Must fit chosen duration.'}
 permissions:
   contents: read
 concurrency:
-  group: compare-product-ads-${{ github.ref }}
+  group: product-video-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  compare:
+  render:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
@@ -28,60 +35,53 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install base ad renderer
+      - name: Install free renderer and voice tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get install -y blender ffmpeg espeak-ng fonts-dejavu-core
           python -m pip install -r requirements.txt
-      - name: Optional automatic background removal
-        continue-on-error: true
-        run: python -m pip install 'rembg==2.0.59' 'numpy==1.26.4' onnxruntime
-      - name: Optional pinned 3D reconstruction dependencies
-        if: inputs.include_3d
-        continue-on-error: true
+      - name: Validate Blender before downloading reconstruction weights
+        env:
+          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: blender --background --disable-autoexec --python-exit-code 1 --python render_free3d.py -- --check-deps
+      - name: Install CPU reconstruction for photo inputs
+        if: inputs.input_mode != 'demo_3d' && inputs.input_mode != 'existing_glb'
         run: |
-          sudo apt-get install -y blender espeak-ng
           git init .triposr
           git -C .triposr remote add origin https://github.com/VAST-AI-Research/TripoSR.git
           git -C .triposr fetch --depth 1 origin 107cefdc244c39106fa830359024f6a2f1c78871
           git -C .triposr checkout --detach FETCH_HEAD
           python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements-free3d.txt
-      - name: Tests and real 2D MP4 smoke encode
+      - name: Test exact rotation and both presentation options
+        run: python -m pytest -q tests/test_product_video.py
+      - name: Render rotating product with selected audio and presenter
         env:
-          PHOTO_AD_SMOKE: '1'
-        run: python -m pytest -q tests/test_product_ad.py tests/test_ad_sources.py tests/test_comparison_suite.py
-      - name: Run approaches and preserve per-mode status
-        env:
-          IMAGE_URLS: ${{ inputs.image_urls }}
-          PRODUCT: ${{ inputs.product }}
-          BRAND: ${{ inputs.brand }}
-          HOOK: ${{ inputs.hook }}
-          BENEFITS: ${{ inputs.benefits }}
-          OFFER: ${{ inputs.offer }}
-          CTA: ${{ inputs.cta }}
+          MODE: ${{ inputs.input_mode }}
+          SOURCE: ${{ inputs.source }}
+          INDEX: ${{ inputs.image_index }}
+          PRODUCT: ${{ inputs.product_name }}
+          COUNT: ${{ inputs.variants }}
           DURATION: ${{ inputs.duration }}
-          RESOLUTION: ${{ inputs.resolution }}
-          INCLUDE_3D: ${{ inputs.include_3d }}
-          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+          QUALITY: ${{ inputs.quality }}
+          RES: ${{ inputs.mesh_resolution }}
+          MOTION: ${{ inputs.motion }}
+          ROTATION: ${{ inputs.rotation }}
+          WORDS: ${{ inputs.main_words }}
+          IDEA: ${{ inputs.reel_idea }}
+          CAPTIONS: ${{ inputs.captions }}
+          MUSIC: ${{ inputs.music }}
+          VOICE: ${{ inputs.voice }}
+          PRESENTER: ${{ inputs.presenter }}
+          SCRIPT: ${{ inputs.narration_text }}
           HF_HUB_DISABLE_TELEMETRY: '1'
-        run: |
-          python - <<'PY'
-          import os
-          import product_ad as ads
-          from ad_sources import prepare_inputs
-          from comparison_suite import suite
-          photos,_=prepare_inputs([],os.environ['IMAGE_URLS'])
-          plan=ads.make_plan(os.environ['PRODUCT'],os.environ['BENEFITS'].split('|'),os.environ['OFFER'],os.environ['CTA'],os.environ['HOOK'],os.environ['BRAND'])
-          results=suite(photos,plan,'output_comparison',int(os.environ['DURATION']),os.environ['RESOLUTION'],os.environ['INCLUDE_3D'].lower()=='true')
-          if not any(r['status']=='completed' and r['name']!='Background removal' for r in results):
-              raise SystemExit('No render completed; inspect the comparison report')
-          PY
-      - name: Download all available variants and comparison report
+          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: python product_video.py --input-mode="$MODE" --source="$SOURCE" --image-index="$INDEX" --product-name="$PRODUCT" --variants="$COUNT" --duration="$DURATION" --quality="$QUALITY" --mesh-resolution="$RES" --motion="$MOTION" --rotation="$ROTATION" --main-words="$WORDS" --reel-idea="$IDEA" --captions="$CAPTIONS" --music="$MUSIC" --voice="$VOICE" --presenter="$PRESENTER" --narration-text="$SCRIPT"
+      - name: Download actual product renders and presentation metadata
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: product-ad-comparison-${{ github.run_id }}-${{ github.run_attempt }}
-          path: output_comparison/
+          name: product-video-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output_free3d/
           if-no-files-found: warn
           retention-days: 7
