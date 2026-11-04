@@ -1,0 +1,77 @@
+name: Generate Vape Turntable Reel
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_url:
+        description: 'Vape product webpage URL to scrape (optional)'
+        required: false
+        default: ''
+      photo_url:
+        description: 'Direct photo image URL (optional)'
+        required: false
+        default: ''
+      variant:
+        description: 'Commercial variant: auto (round-robin), 0 (Dark Studio), 1 (Glacier Ice), 2 (Neon Cyberclub), 3 (Candy Clouds), 4 (Deep Water)'
+        required: false
+        default: 'auto'
+      music:
+        description: 'Add calming ambient backing music'
+        required: false
+        default: 'on'
+        type: choice
+        options:
+          - 'on'
+          - 'off'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install --upgrade pillow numpy beautifulsoup4
+
+      - name: Run Veo Vape Turntable Generator
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.product_url }}" ]; then
+            ARGS="$ARGS --product-url \"${{ github.event.inputs.product_url }}\""
+          fi
+          if [ -n "${{ github.event.inputs.photo_url }}" ]; then
+            ARGS="$ARGS --photo-url \"${{ github.event.inputs.photo_url }}\""
+          fi
+          if [ "${{ github.event.inputs.variant }}" != "auto" ]; then
+            ARGS="$ARGS --variant ${{ github.event.inputs.variant }}"
+          fi
+          ARGS="$ARGS --music ${{ github.event.inputs.music }}"
+          
+          python veo_turntable.py $ARGS
+
+      - name: Commit variant history state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .vape_variant_history.json || true
+          git commit -m "Update vape variant history [skip ci]" || true
+          git push origin main || true
+
+      - name: Upload Output Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vape-turntable-commercial
+          path: output/veo_turntable/
