@@ -1,6 +1,5 @@
-"""Automated video generation for vape product commercials with Interactions API and 5 rotating variants."""
+"""Automated video generation for vape product commercials using official Google GenAI SDK."""
 import argparse
-import base64
 import http.client
 import ipaddress
 import json
@@ -14,8 +13,6 @@ import time
 import wave
 from pathlib import Path
 from urllib.parse import urlsplit, urljoin
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps
 import numpy as np
@@ -216,65 +213,56 @@ def generate_ambient_music(output_path, root_freq, duration_seconds=8.0):
         f.writeframes((np.clip(audio, -1, 1) * 32767).astype('<i2').tobytes())
 
 
-def call_interactions_api(image_path, prompt, api_key):
-    with open(image_path, "rb") as f:
-        b64_image = base64.b64encode(f.read()).decode("utf-8")
-    mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+def call_google_genai_video(image_path, prompt, api_key):
+    from google import genai
+    from google.genai import types
 
-    # Google Interactions API endpoint for Gemini Omni video
-    url = f"https://generativelanguage.googleapis.com/v1beta/interactions?key={api_key}"
-    payload = {
-        "model": "gemini-omni-flash-preview",
-        "input": [
-            {
-                "type": "text",
-                "text": prompt
-            },
-            {
-                "type": "image",
-                "inline_data": {
-                    "mime_type": mime,
-                    "data": b64_image
-                }
-            }
-        ],
-        "response_format": [
-            {
-                "type": "video",
-                "resolution": "720p",
-                "aspect_ratio": "9:16",
-                "duration": "8s"
-            }
-        ]
-    }
+    client = genai.Client(api_key=api_key)
+    with Image.open(image_path) as im:
+        pil_image = im.convert("RGB")
 
-    req = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key
-        }
-    )
+    print("Submitting video generation to Google GenAI SDK (client.models.generate_videos)...")
+    candidate_models = ["gemini-omni-1.1-flash", "veo-3.1-fast-generate-preview", "veo-3.1-generate-preview"]
+    last_err = None
 
-    print("Submitting video generation to Gemini Interactions API (gemini-omni-flash-preview)...")
-    with urlopen(req, timeout=120) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
+    for model_name in candidate_models:
+        try:
+            print(f"Requesting video generation with model: {model_name}...")
+            operation = client.models.generate_videos(
+                model=model_name,
+                prompt=prompt,
+                image=pil_image,
+                config=types.GenerateVideosConfig(
+                    aspect_ratio="9:16",
+                    duration_seconds=8
+                )
+            )
+            print(f"Generation task started. Operation: {getattr(operation, 'name', operation)}. Polling...")
+            while not operation.done:
+                time.sleep(10)
+                operation = client.operations.get(operation)
 
-    # Extract video from interaction outputs
-    outputs = res.get("outputs", []) or res.get("response", {}).get("outputs", [])
-    for out in outputs:
-        if out.get("type") == "video":
-            if "bytes" in out:
-                return base64.b64decode(out["bytes"])
-            if "uri" in out:
-                v_url = out["uri"]
-                if "?" not in v_url:
-                    v_url += f"?key={api_key}"
-                with urlopen(Request(v_url, headers={"x-goog-api-key": api_key}), timeout=60) as v_resp:
-                    return v_resp.read()
+            if hasattr(operation, "error") and operation.error:
+                raise RuntimeError(operation.error)
 
-    raise RuntimeError(f"Unexpected response structure from Interactions API: {res}")
+            generated_videos = operation.response.generated_videos
+            if not generated_videos:
+                raise RuntimeError("No video returned from generation operation.")
+
+            vid = generated_videos[0]
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                tmp_out = f.name
+            
+            client.files.download(file=vid.video, download_path=tmp_out)
+            data = Path(tmp_out).read_bytes()
+            Path(tmp_out).unlink(missing_ok=True)
+            return data
+        except Exception as exc:
+            last_err = exc
+            print(f"Model {model_name} error: {exc}. Trying next model...")
+            continue
+
+    raise RuntimeError(f"All GenAI video generation models failed: {last_err}")
 
 
 def main():
@@ -302,7 +290,7 @@ def main():
         print(f"Selected Vape Variant [{var_idx + 1}/5]: {variant['name']}")
         print(f"Generating commercial from image: {product_img.name}...")
 
-        raw_video_bytes = call_interactions_api(product_img, variant["prompt"], api_key)
+        raw_video_bytes = call_google_genai_video(product_img, variant["prompt"], api_key)
         raw_video_path = tmp_dir / "raw.mp4"
         raw_video_path.write_bytes(raw_video_bytes)
 

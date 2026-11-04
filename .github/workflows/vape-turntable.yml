@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install --upgrade pillow numpy beautifulsoup4
+          pip install --upgrade google-genai pillow numpy beautifulsoup4
 
       - name: Run Veo Vape Turntable Generator
         env:
