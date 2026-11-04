@@ -1,4 +1,4 @@
-"""Automated Veo video generation for vape product commercials with multiple input methods and 5 rotating variants."""
+"""Automated video generation for vape product commercials with model fallback and 5 rotating variants."""
 import argparse
 import base64
 import http.client
@@ -15,6 +15,7 @@ import wave
 from pathlib import Path
 from urllib.parse import urlsplit, urljoin
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps
 import numpy as np
@@ -22,6 +23,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
 STATE_FILE = ROOT / '.vape_variant_history.json'
+
+CANDIDATE_VEO_MODELS = [
+    "veo-3.1-fast-generate-preview",
+    "veo-3.1-generate-preview",
+    "veo-3.0-generate-001",
+    "veo-2.0-generate-video",
+]
 
 VAPE_VARIANTS = [
     {
@@ -166,14 +174,12 @@ def extract_product_images(html, url):
 
 
 def get_input_image(args, temp_dir):
-    # Method 1: Direct Image URL
     if args.photo_url:
         data = fetch(args.photo_url)
         path = temp_dir / 'downloaded.png'
         path.write_bytes(data)
         return path
 
-    # Method 2: Scrape Product Page URL
     if args.product_url:
         print(f"Scraping product page: {args.product_url}")
         html = fetch(args.product_url, limit=2000000).decode('utf-8', errors='ignore')
@@ -186,15 +192,13 @@ def get_input_image(args, temp_dir):
         path.write_bytes(data)
         return path
 
-    # Method 3: Local Folder (e.g. inbox/)
     folder = Path(args.input_folder).resolve()
     if folder.is_dir():
         local_imgs = sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS])
         if local_imgs:
             return local_imgs[0]
 
-    # Method 4: Fallback to AI Generative Starter if no photo exists
-    print("Notice: No photo provided. Generating high-resolution product seed image...")
+    print("Notice: Generating product canvas seed...")
     gen_path = temp_dir / 'synth_vape.png'
     img = Image.new('RGB', (1080, 1920), '#080C14')
     ImageOps.fit(img, (1080, 1920)).save(gen_path)
@@ -220,7 +224,6 @@ def generate_ambient_music(output_path, root_freq, duration_seconds=8.0):
 
 
 def call_veo_api(image_path, prompt, api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/veo-2.0-generate-video:predictLongRunning?key={api_key}"
     with open(image_path, "rb") as f:
         b64_image = base64.b64encode(f.read()).decode("utf-8")
     mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
@@ -236,32 +239,62 @@ def call_veo_api(image_path, prompt, api_key):
             "durationSeconds": 8
         }
     }
+    encoded_payload = json.dumps(payload).encode("utf-8")
 
-    req = Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
-    with urlopen(req) as resp:
-        op = json.loads(resp.read().decode("utf-8"))
-    
-    op_name = op.get("name")
-    if not op_name:
-        raise RuntimeError(f"Failed to start video generation: {op}")
+    last_error = None
+    for model_name in CANDIDATE_VEO_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:predictLongRunning"
+        req = Request(
+            url,
+            data=encoded_payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key
+            }
+        )
+        try:
+            print(f"Attempting model: {model_name}...")
+            with urlopen(req, timeout=30) as resp:
+                op = json.loads(resp.read().decode("utf-8"))
+            op_name = op.get("name")
+            if not op_name:
+                continue
 
-    print(f"Veo task started: {op_name}. Polling status...")
-    check_url = f"https://generativelanguage.googleapis.com/v1beta/{op_name}?key={api_key}"
-    for _ in range(60):
-        time.sleep(10)
-        with urlopen(check_url) as poll_resp:
-            status = json.loads(poll_resp.read().decode("utf-8"))
-        if status.get("done"):
-            if "error" in status:
-                raise RuntimeError(status["error"])
-            res = status.get("response", {})
-            videos = res.get("generatedVideos", []) or res.get("videos", [])
-            if not videos:
-                raise RuntimeError("No video returned from model.")
-            video_uri = videos[0].get("video", {}).get("uri") or videos[0].get("uri")
-            with urlopen(f"{video_uri}&key={api_key}" if "?" in video_uri else f"{video_uri}?key={api_key}") as v_resp:
-                return v_resp.read()
-    raise TimeoutError("Veo video generation timed out.")
+            print(f"Task started on {model_name} ({op_name}). Waiting for completion...")
+            check_url = f"https://generativelanguage.googleapis.com/v1beta/{op_name}"
+            check_req = Request(check_url, headers={"x-goog-api-key": api_key})
+
+            for _ in range(60):
+                time.sleep(10)
+                with urlopen(check_req, timeout=30) as poll_resp:
+                    status = json.loads(poll_resp.read().decode("utf-8"))
+                if status.get("done"):
+                    if "error" in status:
+                        raise RuntimeError(status["error"])
+                    res = status.get("response", {})
+                    samples = (
+                        res.get("generateVideoResponse", {}).get("generatedSamples")
+                        or res.get("generatedVideos")
+                        or res.get("videos")
+                        or []
+                    )
+                    if not samples:
+                        raise RuntimeError("No video samples returned.")
+                    video_info = samples[0].get("video", {})
+                    video_uri = video_info.get("uri") or samples[0].get("uri")
+                    v_req = Request(video_uri, headers={"x-goog-api-key": api_key})
+                    with urlopen(v_req, timeout=60) as v_resp:
+                        return v_resp.read()
+        except HTTPError as err:
+            last_error = err
+            print(f"Model {model_name} returned HTTP {err.code}: {err.reason}. Trying next endpoint...")
+            continue
+        except Exception as exc:
+            last_error = exc
+            print(f"Model {model_name} error: {exc}. Trying next endpoint...")
+            continue
+
+    raise RuntimeError(f"All video model endpoints failed. Last error: {last_error}")
 
 
 def main():
