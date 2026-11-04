@@ -1,4 +1,4 @@
-"""Automated video generation for vape product commercials using official Google GenAI SDK."""
+"""Automated video generation for vape product commercials using Google GenAI SDK client.interactions.create."""
 import argparse
 import http.client
 import ipaddress
@@ -213,56 +213,57 @@ def generate_ambient_music(output_path, root_freq, duration_seconds=8.0):
         f.writeframes((np.clip(audio, -1, 1) * 32767).astype('<i2').tobytes())
 
 
-def call_google_genai_video(image_path, prompt, api_key):
+def call_interactions_sdk(image_path, prompt, api_key):
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
-    with Image.open(image_path) as im:
-        pil_image = im.convert("RGB")
+    print("Uploading input product photo via Gemini Files API...")
+    uploaded_file = client.files.upload(file=str(image_path))
 
-    print("Submitting video generation to Google GenAI SDK (client.models.generate_videos)...")
-    candidate_models = ["gemini-omni-1.1-flash", "veo-3.1-fast-generate-preview", "veo-3.1-generate-preview"]
-    last_err = None
-
-    for model_name in candidate_models:
-        try:
-            print(f"Requesting video generation with model: {model_name}...")
-            operation = client.models.generate_videos(
-                model=model_name,
-                prompt=prompt,
-                image=pil_image,
-                config=types.GenerateVideosConfig(
-                    aspect_ratio="9:16",
-                    duration_seconds=8
-                )
+    print("Generating video with Gemini Interactions API (client.interactions.create)...")
+    interaction = client.interactions.create(
+        model="gemini-omni-1.1-flash",
+        input=[
+            types.Content(
+                parts=[
+                    types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type),
+                    types.Part.from_text(text=prompt)
+                ]
             )
-            print(f"Generation task started. Operation: {getattr(operation, 'name', operation)}. Polling...")
-            while not operation.done:
-                time.sleep(10)
-                operation = client.operations.get(operation)
+        ],
+        response_modalities=["video"]
+    )
 
-            if hasattr(operation, "error") and operation.error:
-                raise RuntimeError(operation.error)
+    # Locate generated video from interaction outputs
+    for candidate in getattr(interaction, "candidates", []):
+        for part in getattr(candidate.content, "parts", []):
+            if hasattr(part, "inline_data") and part.inline_data:
+                return part.inline_data.data
+            if hasattr(part, "file_data") and part.file_data:
+                file_ref = part.file_data.file_uri
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
+                    tmp_p = tf.name
+                client.files.download(file=file_ref, download_path=tmp_p)
+                b = Path(tmp_p).read_bytes()
+                Path(tmp_p).unlink(missing_ok=True)
+                return b
 
-            generated_videos = operation.response.generated_videos
-            if not generated_videos:
-                raise RuntimeError("No video returned from generation operation.")
+    # Check for direct outputs attribute
+    if hasattr(interaction, "outputs"):
+        for out in interaction.outputs:
+            if getattr(out, "type", "") == "video":
+                if hasattr(out, "data"):
+                    return out.data
+                if hasattr(out, "uri"):
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
+                        tmp_p = tf.name
+                    client.files.download(file=out.uri, download_path=tmp_p)
+                    b = Path(tmp_p).read_bytes()
+                    Path(tmp_p).unlink(missing_ok=True)
+                    return b
 
-            vid = generated_videos[0]
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-                tmp_out = f.name
-            
-            client.files.download(file=vid.video, download_path=tmp_out)
-            data = Path(tmp_out).read_bytes()
-            Path(tmp_out).unlink(missing_ok=True)
-            return data
-        except Exception as exc:
-            last_err = exc
-            print(f"Model {model_name} error: {exc}. Trying next model...")
-            continue
-
-    raise RuntimeError(f"All GenAI video generation models failed: {last_err}")
+    raise RuntimeError(f"Interaction succeeded but no video output part was found: {interaction}")
 
 
 def main():
@@ -290,7 +291,7 @@ def main():
         print(f"Selected Vape Variant [{var_idx + 1}/5]: {variant['name']}")
         print(f"Generating commercial from image: {product_img.name}...")
 
-        raw_video_bytes = call_google_genai_video(product_img, variant["prompt"], api_key)
+        raw_video_bytes = call_interactions_sdk(product_img, variant["prompt"], api_key)
         raw_video_path = tmp_dir / "raw.mp4"
         raw_video_path.write_bytes(raw_video_bytes)
 
