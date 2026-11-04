@@ -2,24 +2,12 @@ name: Product Ad Video - Rotation and Presenter Controls
 on:
   workflow_dispatch:
     inputs:
-      input_mode: {type: choice, default: inbox, options: [inbox,image_url,repository_image,product_url,existing_glb,demo_3d], description: 'Choose inbox to automatically use every JPG/JPEG/PNG in the inbox folder'}
-      source: {type: string, default: '', description: 'Leave blank for inbox. Otherwise use a URL, repository image or GLB path.'}
-      inbox_output: {type: choice, default: separate_videos, options: [separate_videos,combined_video], description: 'Inbox: separate rotating videos per image, or also join them in filename order; no multi-view fusion'}
-      image_index: {type: string, default: '1', description: 'Image number from a product page'}
-      product_name: {type: string, default: 'Product showcase'}
-      variants: {type: choice, default: '1', options: ['1','2','3','5','10']}
-      duration: {type: choice, default: '10', options: ['5','10','15']}
-      quality: {type: choice, default: preview_360p, options: [preview_360p,720p,1080p]}
-      mesh_resolution: {type: choice, default: '64', options: ['64','96','128']}
-      motion: {type: choice, default: turntable, options: [auto,turntable,orbit,float,reveal]}
-      rotation: {type: choice, default: '180', options: ['90','180','360'], description: 'Exact model turn or camera orbit; overrides slow/fast angle keywords'}
-      main_words: {type: string, default: '', description: 'Exact offer; used for offer captions'}
-      reel_idea: {type: string, default: '', description: 'Existing keyword direction; rotation uses its own dropdown'}
-      captions: {type: choice, default: post_and_offer, options: [none,offer,post_and_offer]}
-      music: {type: choice, default: 'on', options: [auto,'off','on']}
-      voice: {type: choice, default: 'on', options: ['off','on']}
-      presenter: {type: choice, default: voiceover_only, options: [voiceover_only,visible_humanoid_illustrated], description: 'Visible option is a free animated illustration, not a realistic AI person'}
-      narration_text: {type: string, default: '', description: 'Exact script; default is product name plus offer. Applied to each source video.'}
+      input_mode: {type: choice, default: inbox, options: [inbox,repository_image], description: 'Choose inbox to automatically use all 4 photos from the inbox folder'}
+      product_name: {type: string, default: 'Rocky Vapor - Watermelon Berries'}
+      main_words: {type: string, default: 'Special Deal', description: 'Offer text overlay'}
+      duration: {type: choice, default: '10', options: ['10','15','20']}
+      quality: {type: choice, default: 720p, options: [720p,1080p]}
+      music: {type: choice, default: 'on', options: ['off','on']}
 permissions:
   contents: read
 concurrency:
@@ -28,7 +16,7 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,60 +24,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Validate all Inbox images and list the source files
-        if: inputs.input_mode == 'inbox'
-        run: |
-          python -m pip install 'Pillow>=10.4,<13'
-          python - <<'PY'
-          from pathlib import Path
-          from inbox_video import discover
-          for path in discover(Path.cwd()):
-              print(path.relative_to(Path.cwd()))
-          PY
-      - name: Install free renderer and voice tools
+      - name: Install video tools and background removal
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y blender ffmpeg espeak-ng fonts-dejavu-core
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
           python -m pip install -r requirements.txt
-      - name: Validate Blender before downloading reconstruction weights
+          python -m pip install 'rembg==2.0.59' onnxruntime
+      - name: Render crisp multi-angle product ad with background removal
         env:
-          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
-        run: blender --background --disable-autoexec --python-exit-code 1 --python render_free3d.py -- --check-deps
-      - name: Install CPU reconstruction for photo inputs
-        if: inputs.input_mode != 'demo_3d' && inputs.input_mode != 'existing_glb'
-        run: |
-          git init .triposr
-          git -C .triposr remote add origin https://github.com/VAST-AI-Research/TripoSR.git
-          git -C .triposr fetch --depth 1 origin 107cefdc244c39106fa830359024f6a2f1c78871
-          git -C .triposr checkout --detach FETCH_HEAD
-          python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install -r requirements-free3d.txt
-      - name: Test Inbox discovery, batching, rotation and presentation
-        run: python -m pytest -q tests/test_inbox_video.py tests/test_product_video.py
-      - name: Render selected sources with rotation, audio and presenter
-        env:
-          MODE: ${{ inputs.input_mode }}
-          SOURCE: ${{ inputs.source }}
-          INBOX_OUTPUT: ${{ inputs.inbox_output }}
-          INDEX: ${{ inputs.image_index }}
           PRODUCT: ${{ inputs.product_name }}
-          COUNT: ${{ inputs.variants }}
+          OFFER: ${{ inputs.main_words }}
           DURATION: ${{ inputs.duration }}
           QUALITY: ${{ inputs.quality }}
-          RES: ${{ inputs.mesh_resolution }}
-          MOTION: ${{ inputs.motion }}
-          ROTATION: ${{ inputs.rotation }}
-          WORDS: ${{ inputs.main_words }}
-          IDEA: ${{ inputs.reel_idea }}
-          CAPTIONS: ${{ inputs.captions }}
           MUSIC: ${{ inputs.music }}
-          VOICE: ${{ inputs.voice }}
-          PRESENTER: ${{ inputs.presenter }}
-          SCRIPT: ${{ inputs.narration_text }}
-          HF_HUB_DISABLE_TELEMETRY: '1'
-          REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
-        run: python inbox_video.py --input-mode="$MODE" --source="$SOURCE" --inbox-output="$INBOX_OUTPUT" --image-index="$INDEX" --product-name="$PRODUCT" --variants="$COUNT" --duration="$DURATION" --quality="$QUALITY" --mesh-resolution="$RES" --motion="$MOTION" --rotation="$ROTATION" --main-words="$WORDS" --reel-idea="$IDEA" --captions="$CAPTIONS" --music="$MUSIC" --voice="$VOICE" --presenter="$PRESENTER" --narration-text="$SCRIPT"
-      - name: Download product renders, source manifest and logs
+        run: |
+          python inbox_video.py --input-mode=inbox --product-name="$PRODUCT" --main-words="$OFFER" --duration="$DURATION" --quality="$QUALITY" --music="$MUSIC"
+      - name: Download product ad video
         if: always()
         uses: actions/upload-artifact@v4
         with:
