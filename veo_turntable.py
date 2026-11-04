@@ -25,10 +25,12 @@ EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
 STATE_FILE = ROOT / '.vape_variant_history.json'
 
 CANDIDATE_VEO_MODELS = [
+    "gemini-omni-1.1-flash",
+    "veo-3.0-generate-preview",
+    "veo-3.1-lite-generate-preview",
     "veo-3.1-fast-generate-preview",
     "veo-3.1-generate-preview",
-    "veo-3.0-generate-001",
-    "veo-2.0-generate-video",
+    "veo-2.0-generate-001"
 ]
 
 VAPE_VARIANTS = [
@@ -223,6 +225,18 @@ def generate_ambient_music(output_path, root_freq, duration_seconds=8.0):
         f.writeframes((np.clip(audio, -1, 1) * 32767).astype('<i2').tobytes())
 
 
+def query_supported_models(api_key):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        with urlopen(Request(url, headers={"Content-Type": "application/json"}), timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+            return [m for m in models if any(k in m.lower() for k in ("video", "veo", "omni"))]
+    except Exception as exc:
+        print(f"Notice: Could not list models: {exc}")
+        return []
+
+
 def call_veo_api(image_path, prompt, api_key):
     with open(image_path, "rb") as f:
         b64_image = base64.b64encode(f.read()).decode("utf-8")
@@ -241,9 +255,13 @@ def call_veo_api(image_path, prompt, api_key):
     }
     encoded_payload = json.dumps(payload).encode("utf-8")
 
+    active_models = query_supported_models(api_key)
+    trial_models = active_models + [m for m in CANDIDATE_VEO_MODELS if m not in active_models]
+    print(f"Candidate video models: {trial_models}")
+
     last_error = None
-    for model_name in CANDIDATE_VEO_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:predictLongRunning"
+    for model_name in trial_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:predictLongRunning?key={api_key}"
         req = Request(
             url,
             data=encoded_payload,
@@ -261,7 +279,7 @@ def call_veo_api(image_path, prompt, api_key):
                 continue
 
             print(f"Task started on {model_name} ({op_name}). Waiting for completion...")
-            check_url = f"https://generativelanguage.googleapis.com/v1beta/{op_name}"
+            check_url = f"https://generativelanguage.googleapis.com/v1beta/{op_name}?key={api_key}"
             check_req = Request(check_url, headers={"x-goog-api-key": api_key})
 
             for _ in range(60):
@@ -282,7 +300,8 @@ def call_veo_api(image_path, prompt, api_key):
                         raise RuntimeError("No video samples returned.")
                     video_info = samples[0].get("video", {})
                     video_uri = video_info.get("uri") or samples[0].get("uri")
-                    v_req = Request(video_uri, headers={"x-goog-api-key": api_key})
+                    v_url = f"{video_uri}&key={api_key}" if "?" in video_uri else f"{video_uri}?key={api_key}"
+                    v_req = Request(v_url, headers={"x-goog-api-key": api_key})
                     with urlopen(v_req, timeout=60) as v_resp:
                         return v_resp.read()
         except HTTPError as err:
