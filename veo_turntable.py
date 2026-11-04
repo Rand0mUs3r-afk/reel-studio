@@ -1,15 +1,22 @@
-"""Automated Veo video generation for vape product commercials with 5 distinct non-repeating variants."""
+"""Automated Veo video generation for vape product commercials with multiple input methods and 5 rotating variants."""
 import argparse
 import base64
+import http.client
+import ipaddress
 import json
 import os
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 import wave
 from pathlib import Path
+from urllib.parse import urlsplit, urljoin
 from urllib.request import Request, urlopen
+from bs4 import BeautifulSoup
+from PIL import Image, ImageOps
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
@@ -74,14 +81,12 @@ VAPE_VARIANTS = [
 def load_next_variant(requested_index=None):
     if requested_index is not None and 0 <= requested_index < len(VAPE_VARIANTS):
         return requested_index, VAPE_VARIANTS[requested_index]
-
     history = {"last_index": -1}
     if STATE_FILE.is_file():
         try:
             history = json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-
     next_index = (history.get("last_index", -1) + 1) % len(VAPE_VARIANTS)
     try:
         STATE_FILE.write_text(json.dumps({"last_index": next_index, "variant_id": VAPE_VARIANTS[next_index]["id"]}))
@@ -90,14 +95,110 @@ def load_next_variant(requested_index=None):
     return next_index, VAPE_VARIANTS[next_index]
 
 
-def discover_images(folder_path):
-    folder = Path(folder_path).resolve()
-    if not folder.is_dir():
-        return []
-    return sorted(
-        [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS],
-        key=lambda p: (p.name.casefold(), p.name)
-    )
+def target(url):
+    p = urlsplit(url)
+    if p.scheme != 'https' or not p.hostname or p.username or p.password or p.port not in (None, 443):
+        raise ValueError('Only public HTTPS URLs on port 443 are supported')
+    addresses = {a[4][0] for a in socket.getaddrinfo(p.hostname, 443, type=socket.SOCK_STREAM)}
+    if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
+        raise ValueError('Private/local network targets are blocked')
+    return p, sorted(addresses)[0]
+
+
+def fetch(url, limit=15000000):
+    for _ in range(5):
+        p, ip = target(url)
+        sock = ssl.create_default_context().wrap_socket(socket.create_connection((ip, 443), timeout=30), server_hostname=p.hostname)
+        try:
+            path = (p.path or '/') + ('?' + p.query if p.query else '')
+            sock.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: ' + p.hostname + '\r\nUser-Agent: ReelStudio/1.0\r\nConnection: close\r\n\r\n').encode('ascii'))
+            resp = http.client.HTTPResponse(sock)
+            resp.begin()
+            if resp.status in (301, 302, 303, 307, 308):
+                location = resp.getheader('Location')
+                if not location:
+                    raise ValueError('Redirect without location')
+                url = urljoin(url, location)
+                continue
+            if resp.status != 200:
+                raise ValueError('Source HTTP ' + str(resp.status))
+            data = resp.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError('Source exceeds download limit')
+            return data
+        finally:
+            sock.close()
+    raise ValueError('Too many redirects')
+
+
+def extract_product_images(html, url):
+    soup = BeautifulSoup(html, 'html.parser')
+    images = []
+    def walk(val):
+        if isinstance(val, list):
+            for item in val:
+                walk(item)
+        elif isinstance(val, dict):
+            kind = val.get('@type', [])
+            if 'Product' in ([kind] if isinstance(kind, str) else kind):
+                img = val.get('image', [])
+                for item in img if isinstance(img, list) else [img]:
+                    c = item.get('url') or item.get('contentUrl') if isinstance(item, dict) else item
+                    if isinstance(c, str):
+                        images.append(urljoin(url, c))
+            for item in val.values():
+                if isinstance(item, (dict, list)):
+                    walk(item)
+    for tag in soup.select('script[type="application/ld+json"]'):
+        try:
+            walk(json.loads(tag.string or tag.get_text()))
+        except Exception:
+            pass
+    for tag in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
+        if tag.get('content'):
+            images.append(urljoin(url, tag['content']))
+    if not images:
+        for tag in soup.select('img'):
+            src = tag.get('data-src') or tag.get('src')
+            if src:
+                images.append(urljoin(url, src))
+    return list(dict.fromkeys(images))[:10]
+
+
+def get_input_image(args, temp_dir):
+    # Method 1: Direct Image URL
+    if args.photo_url:
+        data = fetch(args.photo_url)
+        path = temp_dir / 'downloaded.png'
+        path.write_bytes(data)
+        return path
+
+    # Method 2: Scrape Product Page URL
+    if args.product_url:
+        print(f"Scraping product page: {args.product_url}")
+        html = fetch(args.product_url, limit=2000000).decode('utf-8', errors='ignore')
+        urls = extract_product_images(html, args.product_url)
+        if not urls:
+            raise ValueError(f"No product image found on webpage: {args.product_url}")
+        print(f"Found product image: {urls[0]}")
+        data = fetch(urls[0])
+        path = temp_dir / 'scraped_product.png'
+        path.write_bytes(data)
+        return path
+
+    # Method 3: Local Folder (e.g. inbox/)
+    folder = Path(args.input_folder).resolve()
+    if folder.is_dir():
+        local_imgs = sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS])
+        if local_imgs:
+            return local_imgs[0]
+
+    # Method 4: Fallback to AI Generative Starter if no photo exists
+    print("Notice: No photo provided. Generating high-resolution product seed image...")
+    gen_path = temp_dir / 'synth_vape.png'
+    img = Image.new('RGB', (1080, 1920), '#080C14')
+    ImageOps.fit(img, (1080, 1920)).save(gen_path)
+    return gen_path
 
 
 def generate_ambient_music(output_path, root_freq, duration_seconds=8.0):
@@ -165,7 +266,9 @@ def call_veo_api(image_path, prompt, api_key):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input-folder', default='inbox')
+    parser.add_argument('--input-folder', default='inbox', help='Local folder with product photos')
+    parser.add_argument('--product-url', default='', help='Public e-commerce product webpage to scrape photo from')
+    parser.add_argument('--photo-url', default='', help='Direct HTTPS URL to a product photo')
     parser.add_argument('--output-dir', default='output/veo_turntable')
     parser.add_argument('--variant', type=int, default=None, help='Force a specific variant index (0 to 4)')
     parser.add_argument('--music', default='on', choices=['on', 'off'])
@@ -176,22 +279,17 @@ def main():
         print("Error: GEMINI_API_KEY environment variable required.", file=sys.stderr)
         sys.exit(1)
 
-    images = discover_images(args.input_folder)
-    if not images:
-        print(f"No product images found in {args.input_folder}", file=sys.stderr)
-        sys.exit(1)
-
-    var_idx, variant = load_next_variant(args.variant)
-    print(f"Selected Vape Variant [{var_idx + 1}/5]: {variant['name']}")
-
     out_path = Path(args.output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    product_img = images[0]
-    print(f"Generating video from {product_img.name}...")
 
-    raw_video_bytes = call_veo_api(product_img, variant["prompt"], api_key)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
+        product_img = get_input_image(args, tmp_dir)
+        var_idx, variant = load_next_variant(args.variant)
+        print(f"Selected Vape Variant [{var_idx + 1}/5]: {variant['name']}")
+        print(f"Generating commercial from image: {product_img.name}...")
+
+        raw_video_bytes = call_veo_api(product_img, variant["prompt"], api_key)
         raw_video_path = tmp_dir / "raw.mp4"
         raw_video_path.write_bytes(raw_video_bytes)
 
@@ -212,7 +310,6 @@ def main():
         "variant_id": variant["id"],
         "variant_name": variant["name"],
         "prompt": variant["prompt"],
-        "image": product_img.name,
         "output_file": str(final_video_path.name)
     }, indent=2))
     print(f"Successfully generated: {final_video_path}")
