@@ -2,8 +2,9 @@ name: Product Ad Video - Rotation and Presenter Controls
 on:
   workflow_dispatch:
     inputs:
-      input_mode: {type: choice, default: image_url, options: [image_url, repository_image, product_url, existing_glb, demo_3d]}
-      source: {type: string, default: '', description: 'Direct HTTPS image, product page, repository file, or GLB; empty only for demo'}
+      input_mode: {type: choice, default: inbox, options: [inbox,image_url,repository_image,product_url,existing_glb,demo_3d], description: 'Choose inbox to automatically use every JPG/JPEG/PNG in the inbox folder'}
+      source: {type: string, default: '', description: 'Leave blank for inbox. Otherwise use a URL, repository image or GLB path.'}
+      inbox_output: {type: choice, default: separate_videos, options: [separate_videos,combined_video], description: 'Inbox: separate rotating videos per image, or also join them in filename order; no multi-view fusion'}
       image_index: {type: string, default: '1', description: 'Image number from a product page'}
       product_name: {type: string, default: 'Product showcase'}
       variants: {type: choice, default: '1', options: ['1','2','3','5','10']}
@@ -13,12 +14,12 @@ on:
       motion: {type: choice, default: turntable, options: [auto,turntable,orbit,float,reveal]}
       rotation: {type: choice, default: '180', options: ['90','180','360'], description: 'Exact model turn or camera orbit; overrides slow/fast angle keywords'}
       main_words: {type: string, default: '', description: 'Exact offer; used for offer captions'}
-      reel_idea: {type: string, default: '', description: 'Existing keyword direction; light background etc. Rotation uses its own dropdown.'}
+      reel_idea: {type: string, default: '', description: 'Existing keyword direction; rotation uses its own dropdown'}
       captions: {type: choice, default: post_and_offer, options: [none,offer,post_and_offer]}
       music: {type: choice, default: 'on', options: [auto,'off','on']}
       voice: {type: choice, default: 'on', options: ['off','on']}
       presenter: {type: choice, default: voiceover_only, options: [voiceover_only,visible_humanoid_illustrated], description: 'Visible option is a free animated illustration, not a realistic AI person'}
-      narration_text: {type: string, default: '', description: 'Optional exact script. Default: product name plus offer. Must fit chosen duration.'}
+      narration_text: {type: string, default: '', description: 'Exact script; default is product name plus offer. Applied to each source video.'}
 permissions:
   contents: read
 concurrency:
@@ -35,6 +36,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Validate all Inbox images and list the source files
+        if: inputs.input_mode == 'inbox'
+        run: |
+          python -m pip install 'Pillow>=10.4,<13'
+          python - <<'PY'
+          from pathlib import Path
+          from inbox_video import discover
+          for path in discover(Path.cwd()):
+              print(path.relative_to(Path.cwd()))
+          PY
       - name: Install free renderer and voice tools
         run: |
           sudo apt-get update -qq
@@ -53,12 +64,13 @@ jobs:
           git -C .triposr checkout --detach FETCH_HEAD
           python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements-free3d.txt
-      - name: Test exact rotation and both presentation options
-        run: python -m pytest -q tests/test_product_video.py
-      - name: Render rotating product with selected audio and presenter
+      - name: Test Inbox discovery, batching, rotation and presentation
+        run: python -m pytest -q tests/test_inbox_video.py tests/test_product_video.py
+      - name: Render selected sources with rotation, audio and presenter
         env:
           MODE: ${{ inputs.input_mode }}
           SOURCE: ${{ inputs.source }}
+          INBOX_OUTPUT: ${{ inputs.inbox_output }}
           INDEX: ${{ inputs.image_index }}
           PRODUCT: ${{ inputs.product_name }}
           COUNT: ${{ inputs.variants }}
@@ -76,8 +88,8 @@ jobs:
           SCRIPT: ${{ inputs.narration_text }}
           HF_HUB_DISABLE_TELEMETRY: '1'
           REEL_STUDIO_HOST_PYTHON: ${{ env.pythonLocation }}/bin/python
-        run: python product_video.py --input-mode="$MODE" --source="$SOURCE" --image-index="$INDEX" --product-name="$PRODUCT" --variants="$COUNT" --duration="$DURATION" --quality="$QUALITY" --mesh-resolution="$RES" --motion="$MOTION" --rotation="$ROTATION" --main-words="$WORDS" --reel-idea="$IDEA" --captions="$CAPTIONS" --music="$MUSIC" --voice="$VOICE" --presenter="$PRESENTER" --narration-text="$SCRIPT"
-      - name: Download actual product renders and presentation metadata
+        run: python inbox_video.py --input-mode="$MODE" --source="$SOURCE" --inbox-output="$INBOX_OUTPUT" --image-index="$INDEX" --product-name="$PRODUCT" --variants="$COUNT" --duration="$DURATION" --quality="$QUALITY" --mesh-resolution="$RES" --motion="$MOTION" --rotation="$ROTATION" --main-words="$WORDS" --reel-idea="$IDEA" --captions="$CAPTIONS" --music="$MUSIC" --voice="$VOICE" --presenter="$PRESENTER" --narration-text="$SCRIPT"
+      - name: Download product renders, source manifest and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
